@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: konbini
       POSTGRES_USER: konbini
-      POSTGRES_PASSWORD: konbini_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
@@ -22,9 +22,9 @@ services:
       dockerfile: Dockerfile
     container_name: konbini-backend
     environment:
-      - DATABASE_URL=postgres://konbini:konbini_password@postgres:5432/konbini?sslmode=disable
-      - BSKY_HANDLE=${BSKY_HANDLE:?}
-      - BSKY_PASSWORD=${BSKY_PASSWORD:?}
+      - DATABASE_URL=postgres://konbini:${POSTGRES_PASSWORD}@postgres:5432/konbini?sslmode=disable
+      - BSKY_HANDLE=${BSKY_HANDLE}
+      - BSKY_PASSWORD=${BSKY_PASSWORD}
     ports:
       - "4444:4444"
     depends_on:
@@ -42,6 +42,3 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
-
-volumes:
-  postgres_data:
