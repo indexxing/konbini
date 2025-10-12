@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: konbini
       POSTGRES_USER: konbini
-      POSTGRES_PASSWORD: konbini_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
@@ -22,26 +22,44 @@ services:
       dockerfile: Dockerfile
     container_name: konbini-backend
     environment:
-      - DATABASE_URL=postgres://konbini:konbini_password@postgres:5432/konbini?sslmode=disable
-      - BSKY_HANDLE=${BSKY_HANDLE:?}
-      - BSKY_PASSWORD=${BSKY_PASSWORD:?}
+      - DATABASE_URL=postgres://konbini:${POSTGRES_PASSWORD}@postgres:5432/konbini?sslmode=disable
+      - BSKY_HANDLE=${BSKY_HANDLE}
+      - BSKY_PASSWORD=${BSKY_PASSWORD}
     ports:
       - "4444:4444"
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: konbini-frontend
-    ports:
-      - "3000:80"
-    depends_on:
-      - backend
-    restart: unless-stopped
-
-volumes:
-  postgres_data:
+    command: >
+      sh -c '
+        echo "{
+          \"@context\": [
+            \"https://www.w3.org/ns/did/v1\",
+            \"https://w3id.org/security/multikey/v1\"
+          ],
+          \"id\": \"did:web:api.bsky.indexx.dev\",
+          \"verificationMethod\": [
+            {
+              \"id\": \"did:web:bsky.indexx.dev#atproto\",
+              \"type\": \"Multikey\",
+              \"controller\": \"did:web:api.bsky.indexx.dev\",
+              \"publicKeyMultibase\": \"zQ3shTX4EtEXJHcENR4DW38rZLLRN46s9peYJfeDfzUAKK98j\"
+            }
+          ],
+          \"service\": [
+            {
+              \"id\": \"#bsky_notif\",
+              \"type\": \"BskyNotificationService\",
+              \"serviceEndpoint\": \"https://api.bsky.indexx.dev\"
+            },
+            {
+              \"id\": \"#bsky_appview\",
+              \"type\": \"BskyAppView\",
+              \"serviceEndpoint\": \"https://api.bsky.indexx.dev\"
+            }
+          ]
+        }" > /did.json &&
+        echo "✅ did.json created successfully at /did.json" &&
+        exec ./your-backend-binary
+      '
