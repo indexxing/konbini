@@ -1,4 +1,4 @@
-package main
+package backend
 
 import (
 	"bytes"
@@ -6,37 +6,25 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/api/bsky"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/bluesky-social/indigo/repo"
-	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/ipfs/go-cid"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"gorm.io/gorm"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	. "github.com/whyrusleeping/konbini/models"
 )
 
-type PostgresBackend struct {
-	db  *gorm.DB
-	pgx *pgxpool.Pool
-	s   *Server
-
-	relevantDids map[string]bool
-	rdLk         sync.Mutex
-
-	revCache *lru.TwoQueueCache[uint, string]
-
-	repoCache *lru.TwoQueueCache[string, *Repo]
-	reposLk   sync.Mutex
-
-	postInfoCache *lru.TwoQueueCache[string, cachedPostInfo]
-}
+var handleOpHist = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "handle_op_duration",
+	Help:    "A histogram of op handling durations",
+	Buckets: prometheus.ExponentialBuckets(1, 2, 15),
+}, []string{"op", "collection"})
 
 func (b *PostgresBackend) HandleEvent(ctx context.Context, evt *atproto.SyncSubscribeRepos_Commit) error {
 	r, err := repo.ReadRepoFromCar(ctx, bytes.NewReader(evt.Blocks))
@@ -82,7 +70,7 @@ func (b *PostgresBackend) HandleEvent(ctx context.Context, evt *atproto.SyncSubs
 func (b *PostgresBackend) HandleCreate(ctx context.Context, repo string, rev string, path string, rec *[]byte, cid *cid.Cid) error {
 	start := time.Now()
 
-	rr, err := b.getOrCreateRepo(ctx, repo)
+	rr, err := b.GetOrCreateRepo(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("get user failed: %w", err)
 	}
@@ -243,8 +231,13 @@ func (b *PostgresBackend) HandleCreatePost(ctx context.Context, repo *Repo, rkey
 
 		p.InThread = thread
 
-		if p.ReplyToUsr == b.s.myrepo.ID {
-			if err := b.s.AddNotification(ctx, b.s.myrepo.ID, p.Author, uri, cc, NotifKindReply); err != nil {
+		r, err := b.GetOrCreateRepo(ctx, b.mydid)
+		if err != nil {
+			return err
+		}
+
+		if p.ReplyToUsr == r.ID {
+			if err := b.AddNotification(ctx, r.ID, p.Author, uri, cc, NotifKindReply); err != nil {
 				slog.Warn("failed to create notification", "uri", uri, "error", err)
 			}
 		}
@@ -282,15 +275,15 @@ func (b *PostgresBackend) HandleCreatePost(ctx context.Context, repo *Repo, rkey
 				if feature.RichtextFacet_Mention != nil {
 					mentionDid := feature.RichtextFacet_Mention.Did
 					// This is a mention
-					mentionedRepo, err := b.getOrCreateRepo(ctx, mentionDid)
+					mentionedRepo, err := b.GetOrCreateRepo(ctx, mentionDid)
 					if err != nil {
 						slog.Warn("failed to get repo for mention", "did", mentionDid, "error", err)
 						continue
 					}
 
 					// Create notification if the mentioned user is the current user
-					if mentionedRepo.ID == b.s.myrepo.ID {
-						if err := b.s.AddNotification(ctx, b.s.myrepo.ID, p.Author, uri, cc, NotifKindMention); err != nil {
+					if mentionedRepo.ID == b.myrepo.ID {
+						if err := b.AddNotification(ctx, b.myrepo.ID, p.Author, uri, cc, NotifKindMention); err != nil {
 							slog.Warn("failed to create mention notification", "uri", uri, "error", err)
 						}
 					}
@@ -385,9 +378,9 @@ func (b *PostgresBackend) HandleCreateLike(ctx context.Context, repo *Repo, rkey
 	}
 
 	// Create notification if the liked post belongs to the current user
-	if pinfo.Author == b.s.myrepo.ID {
+	if pinfo.Author == b.myrepo.ID {
 		uri := fmt.Sprintf("at://%s/app.bsky.feed.like/%s", repo.Did, rkey)
-		if err := b.s.AddNotification(ctx, b.s.myrepo.ID, repo.ID, uri, cc, NotifKindLike); err != nil {
+		if err := b.AddNotification(ctx, b.myrepo.ID, repo.ID, uri, cc, NotifKindLike); err != nil {
 			slog.Warn("failed to create like notification", "uri", uri, "error", err)
 		}
 	}
@@ -424,9 +417,9 @@ func (b *PostgresBackend) HandleCreateRepost(ctx context.Context, repo *Repo, rk
 	}
 
 	// Create notification if the reposted post belongs to the current user
-	if pinfo.Author == b.s.myrepo.ID {
+	if pinfo.Author == b.myrepo.ID {
 		uri := fmt.Sprintf("at://%s/app.bsky.feed.repost/%s", repo.Did, rkey)
-		if err := b.s.AddNotification(ctx, b.s.myrepo.ID, repo.ID, uri, cc, NotifKindRepost); err != nil {
+		if err := b.AddNotification(ctx, b.myrepo.ID, repo.ID, uri, cc, NotifKindRepost); err != nil {
 			slog.Warn("failed to create repost notification", "uri", uri, "error", err)
 		}
 	}
@@ -449,7 +442,7 @@ func (b *PostgresBackend) HandleCreateFollow(ctx context.Context, repo *Repo, rk
 		return fmt.Errorf("invalid timestamp: %w", err)
 	}
 
-	subj, err := b.getOrCreateRepo(ctx, rec.Subject)
+	subj, err := b.GetOrCreateRepo(ctx, rec.Subject)
 	if err != nil {
 		return err
 	}
@@ -476,7 +469,7 @@ func (b *PostgresBackend) HandleCreateBlock(ctx context.Context, repo *Repo, rke
 		return fmt.Errorf("invalid timestamp: %w", err)
 	}
 
-	subj, err := b.getOrCreateRepo(ctx, rec.Subject)
+	subj, err := b.GetOrCreateRepo(ctx, rec.Subject)
 	if err != nil {
 		return err
 	}
@@ -536,12 +529,12 @@ func (b *PostgresBackend) HandleCreateListitem(ctx context.Context, repo *Repo, 
 		return fmt.Errorf("invalid timestamp: %w", err)
 	}
 
-	subj, err := b.getOrCreateRepo(ctx, rec.Subject)
+	subj, err := b.GetOrCreateRepo(ctx, rec.Subject)
 	if err != nil {
 		return err
 	}
 
-	list, err := b.getOrCreateList(ctx, rec.List)
+	list, err := b.GetOrCreateList(ctx, rec.List)
 	if err != nil {
 		return err
 	}
@@ -575,7 +568,7 @@ func (b *PostgresBackend) HandleCreateListblock(ctx context.Context, repo *Repo,
 		return fmt.Errorf("invalid timestamp: %w", err)
 	}
 
-	list, err := b.getOrCreateList(ctx, rec.Subject)
+	list, err := b.GetOrCreateList(ctx, rec.Subject)
 	if err != nil {
 		return err
 	}
@@ -739,7 +732,7 @@ func (b *PostgresBackend) HandleCreateStarterPack(ctx context.Context, repo *Rep
 		return fmt.Errorf("invalid timestamp: %w", err)
 	}
 
-	list, err := b.getOrCreateList(ctx, rec.List)
+	list, err := b.GetOrCreateList(ctx, rec.List)
 	if err != nil {
 		return err
 	}
@@ -761,7 +754,7 @@ func (b *PostgresBackend) HandleCreateStarterPack(ctx context.Context, repo *Rep
 func (b *PostgresBackend) HandleUpdate(ctx context.Context, repo string, rev string, path string, rec *[]byte, cid *cid.Cid) error {
 	start := time.Now()
 
-	rr, err := b.getOrCreateRepo(ctx, repo)
+	rr, err := b.GetOrCreateRepo(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("get user failed: %w", err)
 	}
@@ -855,7 +848,7 @@ func (b *PostgresBackend) HandleUpdate(ctx context.Context, repo string, rev str
 func (b *PostgresBackend) HandleDelete(ctx context.Context, repo string, rev string, path string) error {
 	start := time.Now()
 
-	rr, err := b.getOrCreateRepo(ctx, repo)
+	rr, err := b.GetOrCreateRepo(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("get user failed: %w", err)
 	}
@@ -1127,4 +1120,21 @@ func (b *PostgresBackend) HandleDeleteProfile(ctx context.Context, repo *Repo, r
 	}
 
 	return nil
+}
+
+const (
+	NotifKindReply   = "reply"
+	NotifKindLike    = "like"
+	NotifKindMention = "mention"
+	NotifKindRepost  = "repost"
+)
+
+func (b *PostgresBackend) AddNotification(ctx context.Context, forUser, author uint, recordUri string, recordCid cid.Cid, kind string) error {
+	return b.db.Create(&Notification{
+		For:       forUser,
+		Author:    author,
+		Source:    recordUri,
+		SourceCid: recordCid.String(),
+		Kind:      kind,
+	}).Error
 }
