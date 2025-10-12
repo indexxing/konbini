@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
   postgres:
     image: postgres:15-alpine
@@ -33,33 +35,38 @@ services:
     restart: unless-stopped
     command: >
       sh -c '
-        echo "{
-          \"@context\": [
-            \"https://www.w3.org/ns/did/v1\",
-            \"https://w3id.org/security/multikey/v1\"
-          ],
-          \"id\": \"did:web:api.bsky.indexx.dev\",
-          \"verificationMethod\": [
-            {
-              \"id\": \"did:web:bsky.indexx.dev#atproto\",
-              \"type\": \"Multikey\",
-              \"controller\": \"did:web:api.bsky.indexx.dev\",
-              \"publicKeyMultibase\": \"zQ3shTX4EtEXJHcENR4DW38rZLLRN46s9peYJfeDfzUAKK98j\"
-            }
-          ],
-          \"service\": [
-            {
-              \"id\": \"#bsky_notif\",
-              \"type\": \"BskyNotificationService\",
-              \"serviceEndpoint\": \"https://api.bsky.indexx.dev\"
-            },
-            {
-              \"id\": \"#bsky_appview\",
-              \"type\": \"BskyAppView\",
-              \"serviceEndpoint\": \"https://api.bsky.indexx.dev\"
-            }
-          ]
-        }" > /did.json &&
-        echo "✅ did.json created successfully at /did.json" &&
+        echo "Generating /did.json..." && \
+        printf "%s\n" \
+        "{" \
+        "  \"@context\": [" \
+        "    \"https://www.w3.org/ns/did/v1\"," \
+        "    \"https://w3id.org/security/multikey/v1\"" \
+        "  ]," \
+        "  \"id\": \"did:web:api.bsky.indexx.dev\"," \
+        "  \"verificationMethod\": [" \
+        "    {" \
+        "      \"id\": \"did:web:bsky.indexx.dev#atproto\"," \
+        "      \"type\": \"Multikey\"," \
+        "      \"controller\": \"did:web:api.bsky.indexx.dev\"," \
+        "      \"publicKeyMultibase\": \"zQ3shTX4EtEXJHcENR4DW38rZLLRN46s9peYJfeDfzUAKK98j\"" \
+        "    }" \
+        "  ]," \
+        "  \"service\": [" \
+        "    {" \
+        "      \"id\": \"#bsky_notif\"," \
+        "      \"type\": \"BskyNotificationService\"," \
+        "      \"serviceEndpoint\": \"https://api.bsky.indexx.dev\"" \
+        "    }," \
+        "    {" \
+        "      \"id\": \"#bsky_appview\"," \
+        "      \"type\": \"BskyAppView\"," \
+        "      \"serviceEndpoint\": \"https://api.bsky.indexx.dev\"" \
+        "    }" \
+        "  ]" \
+        "}" \
+        > /did.json && \
+
+        echo "✅ did.json created successfully at /did.json" && \
+        echo "Launching backend..." && \
         exec ./konbini
       '
