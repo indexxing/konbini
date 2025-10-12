@@ -61,5 +61,5 @@ services:
           ]
         }" > /did.json &&
         echo "✅ did.json created successfully at /did.json" &&
-        exec ./your-backend-binary
+        exec ./konbini
       '
