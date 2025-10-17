@@ -10,6 +10,7 @@ import (
 
 	"github.com/bluesky-social/indigo/api/atproto"
 	"github.com/bluesky-social/indigo/api/bsky"
+	"github.com/bluesky-social/indigo/atproto/identity"
 	"github.com/bluesky-social/indigo/atproto/syntax"
 	"github.com/bluesky-social/indigo/util"
 	"github.com/bluesky-social/indigo/xrpc"
@@ -26,9 +27,10 @@ import (
 
 // PostgresBackend handles database operations
 type PostgresBackend struct {
-	db      *gorm.DB
-	pgx     *pgxpool.Pool
-	tracker RecordTracker
+	db  *gorm.DB
+	pgx *pgxpool.Pool
+
+	dir identity.Directory
 
 	client *xrpc.Client
 
@@ -43,7 +45,11 @@ type PostgresBackend struct {
 	repoCache *lru.TwoQueueCache[string, *Repo]
 	reposLk   sync.Mutex
 
+	didByIDCache *lru.TwoQueueCache[uint, string]
+
 	postInfoCache *lru.TwoQueueCache[string, cachedPostInfo]
+
+	missingRecords chan MissingRecord
 }
 
 type cachedPostInfo struct {
@@ -52,21 +58,25 @@ type cachedPostInfo struct {
 }
 
 // NewPostgresBackend creates a new PostgresBackend
-func NewPostgresBackend(mydid string, db *gorm.DB, pgx *pgxpool.Pool, client *xrpc.Client, tracker RecordTracker) (*PostgresBackend, error) {
+func NewPostgresBackend(mydid string, db *gorm.DB, pgx *pgxpool.Pool, client *xrpc.Client, dir identity.Directory) (*PostgresBackend, error) {
 	rc, _ := lru.New2Q[string, *Repo](1_000_000)
 	pc, _ := lru.New2Q[string, cachedPostInfo](1_000_000)
 	revc, _ := lru.New2Q[uint, string](1_000_000)
+	dbic, _ := lru.New2Q[uint, string](1_000_000)
 
 	b := &PostgresBackend{
 		client:        client,
 		mydid:         mydid,
 		db:            db,
 		pgx:           pgx,
-		tracker:       tracker,
 		relevantDids:  make(map[string]bool),
 		repoCache:     rc,
 		postInfoCache: pc,
 		revCache:      revc,
+		didByIDCache:  dbic,
+		dir:           dir,
+
+		missingRecords: make(chan MissingRecord, 1000),
 	}
 
 	r, err := b.GetOrCreateRepo(context.TODO(), mydid)
@@ -75,14 +85,37 @@ func NewPostgresBackend(mydid string, db *gorm.DB, pgx *pgxpool.Pool, client *xr
 	}
 
 	b.myrepo = r
+
+	go b.missingRecordFetcher()
 	return b, nil
 }
 
 // TrackMissingRecord implements the RecordTracker interface
 func (b *PostgresBackend) TrackMissingRecord(identifier string, wait bool) {
-	if b.tracker != nil {
-		b.tracker.TrackMissingRecord(identifier, wait)
+	mr := MissingRecord{
+		Type:       mrTypeFromIdent(identifier),
+		Identifier: identifier,
+		Wait:       wait,
 	}
+
+	b.addMissingRecord(context.TODO(), mr)
+}
+
+func mrTypeFromIdent(ident string) MissingRecordType {
+	if strings.HasPrefix(ident, "did:") {
+		return MissingRecordTypeProfile
+	}
+
+	puri, _ := syntax.ParseATURI(ident)
+	switch puri.Collection().String() {
+	case "app.bsky.feed.post":
+		return MissingRecordTypePost
+	case "app.bsky.feed.generator":
+		return MissingRecordTypeFeedGenerator
+	default:
+		return MissingRecordTypeUnknown
+	}
+
 }
 
 // DidToID converts a DID to a database ID
@@ -363,6 +396,21 @@ func (b *PostgresBackend) GetRepoByID(ctx context.Context, id uint) (*models.Rep
 	}
 
 	return &r, nil
+}
+
+func (b *PostgresBackend) DidFromID(ctx context.Context, uid uint) (string, error) {
+	val, ok := b.didByIDCache.Get(uid)
+	if ok {
+		return val, nil
+	}
+
+	r, err := b.GetRepoByID(ctx, uid)
+	if err != nil {
+		return "", err
+	}
+
+	b.didByIDCache.Add(uid, r.Did)
+	return r.Did, nil
 }
 
 func (b *PostgresBackend) checkPostExists(ctx context.Context, repo *Repo, rkey string) (bool, error) {

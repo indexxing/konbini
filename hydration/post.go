@@ -17,6 +17,7 @@ var tracer = otel.Tracer("hydrator")
 
 // PostInfo contains hydrated post information
 type PostInfo struct {
+	ID          uint
 	URI         string
 	Cid         string
 	Post        *bsky.FeedPost
@@ -39,18 +40,21 @@ func (h *Hydrator) HydratePost(ctx context.Context, uri string, viewerDID string
 	ctx, span := tracer.Start(ctx, "hydratePost")
 	defer span.End()
 
+	p, err := h.backend.GetPostByUri(ctx, uri, "*")
+	if err != nil {
+		return nil, err
+	}
+
+	return h.HydratePostDB(ctx, uri, p, viewerDID)
+}
+
+func (h *Hydrator) HydratePostDB(ctx context.Context, uri string, dbPost *models.Post, viewerDID string) (*PostInfo, error) {
 	autoFetch, _ := ctx.Value("auto-fetch").(bool)
 
 	authorDid := extractDIDFromURI(uri)
 	r, err := h.backend.GetOrCreateRepo(ctx, authorDid)
 	if err != nil {
 		return nil, err
-	}
-
-	// Query post from database
-	var dbPost models.Post
-	if err := h.db.Raw(`SELECT * FROM posts WHERE author = ? AND rkey = ? `, r.ID, extractRkeyFromURI(uri)).Scan(&dbPost).Error; err != nil {
-		return nil, fmt.Errorf("failed to query post: %w", err)
 	}
 
 	if dbPost.NotFound || len(dbPost.Raw) == 0 {
@@ -75,9 +79,7 @@ func (h *Hydrator) HydratePost(ctx context.Context, uri string, viewerDID string
 
 	var wg sync.WaitGroup
 
-	// Get author DID
-
-	authorDID := extractDIDFromURI(uri)
+	authorDID := r.Did
 
 	// Get engagement counts
 	var likes, reposts, replies int
@@ -121,6 +123,7 @@ func (h *Hydrator) HydratePost(ctx context.Context, uri string, viewerDID string
 	wg.Wait()
 
 	info := &PostInfo{
+		ID:          dbPost.ID,
 		URI:         uri,
 		Cid:         dbPost.Cid,
 		Post:        &feedPost,
@@ -385,6 +388,9 @@ func (h *Hydrator) formatEmbed(ctx context.Context, embed *bsky.FeedPost_Embed, 
 
 // hydrateEmbeddedRecord hydrates an embedded record (for quote posts, etc.)
 func (h *Hydrator) hydrateEmbeddedRecord(ctx context.Context, uri string, viewerDID string) *bsky.EmbedRecord_View_Record {
+	ctx, span := tracer.Start(ctx, "hydrateEmbeddedRecord")
+	defer span.End()
+
 	// Check if it's a post URI
 	if !isPostURI(uri) {
 		// Could be a feed generator, list, labeler, or starter pack
