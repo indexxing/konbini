@@ -65,6 +65,12 @@ func HandleGetPreferences(c echo.Context, db *gorm.DB, hydrator *hydration.Hydra
 							Type:   "timeline",
 							Value:  "following",
 						},
+						{
+							Id:     "3lux7lncco22l",
+							Pinned: true,
+							Type:   "feed",
+							Value:  "at://did:plc:3guzzweuqraryl3rdkimjamk/app.bsky.feed.generator/for-you",
+						},
 					},
 				},
 			},
